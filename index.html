@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MariWatch · Escolher vídeo do Drive</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; background: #0A0A12; color: #F0F0F8;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex; align-items: center; justify-content: center; padding: 20px;
+  }
+  main { width: 100%; max-width: 440px; }
+  h1 { font-size: 22px; margin: 0 0 6px; }
+  p { color: #B4B4CC; line-height: 1.5; margin: 8px 0; font-size: 15px; }
+  .card { background: #13131F; border: 1px solid #2A2A3E; border-radius: 16px; padding: 20px; }
+  button, a.btn {
+    display: block; width: 100%; text-align: center; text-decoration: none;
+    background: #00C8FF; color: #0A0A12; font-weight: 700; font-size: 16px;
+    border: 0; border-radius: 28px; padding: 14px 18px; margin-top: 14px; cursor: pointer;
+  }
+  button.secondary { background: transparent; color: #B4B4CC; border: 1px solid #2A2A3E; font-weight: 600; }
+  button:disabled { opacity: .45; cursor: default; }
+  .status { margin-top: 14px; font-size: 14px; color: #8A8AA8; min-height: 20px; }
+  .error { color: #FF6B86; }
+  .file { background: #1C1C2E; border-radius: 10px; padding: 10px 12px; margin: 12px 0; word-break: break-word; font-weight: 600; }
+  .note { font-size: 13px; color: #8A8AA8; margin-top: 16px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <div class="card">
+    <h1>Escolher vídeo do Drive</h1>
+
+    <!-- Passo 1: entrar e escolher -->
+    <section id="step-pick">
+      <p>Entre com a sua conta Google e escolha o vídeo que a sala vai assistir.</p>
+      <button id="btn-pick" disabled>Carregando…</button>
+    </section>
+
+    <!-- Passo 2: confirmar a liberação do link -->
+    <section id="step-confirm" hidden>
+      <p>Arquivo escolhido:</p>
+      <div class="file" id="file-name"></div>
+      <p id="confirm-text">Para todos na sala assistirem, o arquivo precisa ficar como <b>“Qualquer pessoa com o link”</b>. Isso deixa o vídeo acessível a quem tiver o endereço dele.</p>
+      <button id="btn-share">Liberar o link e voltar ao MariWatch</button>
+      <button id="btn-skip" class="secondary" hidden>Voltar sem liberar</button>
+      <button id="btn-cancel" class="secondary">Escolher outro</button>
+    </section>
+
+    <!-- Passo 3: voltar -->
+    <section id="step-done" hidden>
+      <p>Pronto! Toque no botão para voltar ao aplicativo.</p>
+      <a id="btn-back" class="btn" href="#">Voltar ao MariWatch</a>
+    </section>
+
+    <div class="status" id="status"></div>
+    <p class="note">O MariWatch só enxerga o arquivo que você escolher (permissão “drive.file”). Esta página não guarda nada.</p>
+  </div>
+</main>
+
+<script>
+(function () {
+  var qs = new URLSearchParams(location.search);
+  var CLIENT_ID = qs.get('clientId');
+  var API_KEY = qs.get('apiKey');
+  var APP_ID = qs.get('appId');
+  var RETURN_BASE = 'mariwatch://drive-picked';          // só volta para o app do MariWatch
+  var SCOPE = 'https://www.googleapis.com/auth/drive.file';
+
+  var $ = function (id) { return document.getElementById(id); };
+  var btnPick = $('btn-pick');
+  var tokenClient = null, accessToken = null, pickerLoaded = false, gisLoaded = false;
+  var current = null;   // { id, name, durationSec, canShare, alreadyPublic }
+
+  function setStatus(msg, isError) {
+    $('status').textContent = msg || '';
+    $('status').className = 'status' + (isError ? ' error' : '');
+  }
+  function show(step) {
+    ['step-pick', 'step-confirm', 'step-done'].forEach(function (s) { $(s).hidden = (s !== step); });
+  }
+
+  window.mwGapiLoaded = window.mwGisLoaded = function () {};   // evita erro se faltar configuração
+
+  if (!CLIENT_ID || !API_KEY || !APP_ID) {
+    btnPick.textContent = 'Configuração ausente';
+    setStatus('Abra esta página pelo aplicativo MariWatch (botão “Escolher do meu Drive”).', true);
+    return;
+  }
+
+  function refreshButton() {
+    if (pickerLoaded && gisLoaded) {
+      btnPick.disabled = false;
+      btnPick.textContent = 'Entrar com o Google e escolher';
+    }
+  }
+
+  // Bibliotecas do Google (chamadas quando terminam de carregar)
+  window.mwGapiLoaded = function () {
+    gapi.load('picker', function () { pickerLoaded = true; refreshButton(); });
+  };
+  window.mwGisLoaded = function () {
+    tokenClient = google.accounts.oauth2.initTokenClient({
+      client_id: CLIENT_ID,
+      scope: SCOPE,
+      callback: function (resp) {
+        if (resp.error) { setStatus('O Google não autorizou: ' + resp.error, true); return; }
+        accessToken = resp.access_token;
+        openPicker();
+      },
+      error_callback: function (err) {
+        var t = err && err.type;
+        if (t === 'popup_closed') setStatus('A janela do Google foi fechada. Toque de novo para continuar.');
+        else if (t === 'popup_failed_to_open') setStatus('O navegador bloqueou a janela do Google. Permita pop-ups e tente de novo.', true);
+        else setStatus('Não foi possível entrar com o Google.', true);
+      }
+    });
+    gisLoaded = true;
+    refreshButton();
+  };
+
+  btnPick.onclick = function () {
+    setStatus('');
+    if (accessToken) openPicker();
+    else tokenClient.requestAccessToken();
+  };
+
+  function openPicker() {
+    var videos = new google.picker.DocsView(google.picker.ViewId.DOCS_VIDEOS)
+      .setMode(google.picker.DocsViewMode.LIST);
+    var myDrive = new google.picker.DocsView()
+      .setIncludeFolders(true)
+      .setMimeTypes('video/mp4,video/x-matroska,video/webm,video/quicktime,video/x-msvideo,video/mpeg')
+      .setMode(google.picker.DocsViewMode.LIST);
+    var picker = new google.picker.PickerBuilder()
+      .setAppId(APP_ID)
+      .setOAuthToken(accessToken)
+      .setDeveloperKey(API_KEY)
+      .setLocale('pt-BR')
+      .setTitle('Escolha o vídeo')
+      .addView(videos)
+      .addView(myDrive)
+      .setCallback(onPicked)
+      .build();
+    picker.setVisible(true);
+  }
+
+  function onPicked(data) {
+    if (data.action === google.picker.Action.PICKED && data.docs && data.docs[0]) {
+      handleFile(data.docs[0].id, data.docs[0].name);
+    } else if (data.action === google.picker.Action.CANCEL) {
+      setStatus('Nenhum vídeo escolhido.');
+    }
+  }
+
+  function api(path, options) {
+    options = options || {};
+    options.headers = Object.assign({ Authorization: 'Bearer ' + accessToken }, options.headers || {});
+    return fetch('https://www.googleapis.com/drive/v3/' + path, options);
+  }
+
+  async function handleFile(id, name) {
+    setStatus('Verificando o arquivo…');
+    var meta = {};
+    try {
+      var r = await api('files/' + encodeURIComponent(id) +
+        '?supportsAllDrives=true&fields=' + encodeURIComponent(
+          'id,name,videoMediaMetadata(durationMillis),capabilities(canShare),permissions(type,role)'));
+      if (r.ok) meta = await r.json();
+    } catch (e) { /* segue com o que o seletor informou */ }
+
+    var perms = meta.permissions || [];
+    var alreadyPublic = perms.some(function (p) { return p.type === 'anyone'; });
+    var canShare = !(meta.capabilities && meta.capabilities.canShare === false);
+    var ms = meta.videoMediaMetadata && Number(meta.videoMediaMetadata.durationMillis);
+    current = {
+      id: id,
+      name: meta.name || name || '',
+      durationSec: ms > 0 ? Math.round(ms / 1000) : 0,
+      canShare: canShare,
+      alreadyPublic: alreadyPublic
+    };
+    setStatus('');
+
+    if (alreadyPublic) { finish(true); return; }
+
+    $('file-name').textContent = current.name;
+    if (!canShare) {
+      $('confirm-text').innerHTML = 'Você não tem permissão para compartilhar este arquivo. Peça ao dono para deixá-lo como <b>“Qualquer pessoa com o link”</b>, senão os outros participantes não conseguirão assistir.';
+      $('btn-share').hidden = true;
+      $('btn-skip').hidden = false;
+    } else {
+      $('btn-share').hidden = false;
+      $('btn-skip').hidden = true;
+    }
+    show('step-confirm');
+  }
+
+  $('btn-share').onclick = async function () {
+    if (!current) return;
+    $('btn-share').disabled = true;
+    setStatus('Liberando o link…');
+    try {
+      var r = await api('files/' + encodeURIComponent(current.id) + '/permissions?supportsAllDrives=true', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role: 'reader', type: 'anyone', allowFileDiscovery: false })
+      });
+      if (r.ok) { finish(true); return; }
+      setStatus('O Google não deixou liberar o link (erro ' + r.status + ').', true);
+    } catch (e) {
+      setStatus('Não foi possível liberar o link.', true);
+    }
+    $('btn-share').disabled = false;
+    $('btn-skip').hidden = false;
+  };
+
+  $('btn-skip').onclick = function () { finish(false); };
+  $('btn-cancel').onclick = function () { current = null; setStatus(''); show('step-pick'); };
+
+  // Devolve o arquivo ao app (celular: endereço mariwatch://; computador: mensagem para a janela que abriu esta)
+  function finish(shared) {
+    var name = (current.name || '').slice(0, 120);
+    var url = RETURN_BASE + '?id=' + encodeURIComponent(current.id) +
+      '&name=' + encodeURIComponent(name) +
+      '&dur=' + current.durationSec +
+      '&shared=' + (shared ? '1' : '0');
+
+    if (window.opener && !window.opener.closed) {
+      window.opener.postMessage({
+        type: 'mariwatch-drive-picked', id: current.id, name: name, dur: current.durationSec, shared: shared
+      }, '*');
+      setStatus('Pronto! Você já pode fechar esta janela.');
+      setTimeout(function () { window.close(); }, 600);
+      show('step-done');
+      $('btn-back').hidden = true;
+      return;
+    }
+
+    $('btn-back').href = url;
+    show('step-done');
+    setStatus('');
+    setTimeout(function () { location.href = url; }, 400);   // alguns navegadores só abrem com o toque no botão
+  }
+})();
+</script>
+<script src="https://apis.google.com/js/api.js" async defer onload="mwGapiLoaded()"></script>
+<script src="https://accounts.google.com/gsi/client" async defer onload="mwGisLoaded()"></script>
+</body>
+</html>
